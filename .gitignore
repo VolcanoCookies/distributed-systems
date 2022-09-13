@@ -1,0 +1,6 @@
+**/*.beam
+**/*.dump
+out/
+rebar3
+**/*.iml
+.idea
