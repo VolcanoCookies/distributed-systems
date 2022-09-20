@@ -22,7 +22,7 @@ inc(Name, Time) ->
     false -> [{Name, 1} | Time]
   end.
 
-merge([], _) -> [];
+merge([], Rem) -> Rem;
 merge([{Name, Ti} | Rest], Time) ->
   case lists:keytake(Name, 1, Time) of
     {value, {Name, N}, Rem} when Ti > N -> [{Name, Ti} | merge(Rest, Rem)];
