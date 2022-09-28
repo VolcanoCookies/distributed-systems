@@ -161,15 +161,16 @@ notify(New, Id, Predecessor, Store) ->
 			Keep = handover(Id, Store, Nkey, Npid),
 			Npid ! {status, Predecessor},
 			{New, Keep};
-		{Pkey, _} ->
+		{Pkey, Ppid} ->
 			case key:between(Nkey, Pkey, Id) of
 				true ->
 					Keep = handover(Id, Store, Nkey, Npid),
 					Npid ! {status, New},
 					{New, Keep};
 				false ->
+					Keep = handover(Id, Store, Pkey, Ppid),
 					Npid ! {status, Predecessor},
-					{Predecessor, Store}
+					{Predecessor, Keep}
 			end
 	end.
 
