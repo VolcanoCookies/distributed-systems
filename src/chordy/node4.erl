@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 27. Sep 2022 16:20
 %%%-------------------------------------------------------------------
--module(node3).
+-module(node4).
 
 -author("frane").
 
@@ -33,7 +33,7 @@ init(Id, Peer) ->
     Predecessor = nil,
     {ok, Successor} = connect(Id, Peer),
     schedule_stabilize(),
-    node(Id, Predecessor, monitor(Successor), storage:create(), nil).
+    node(Id, Predecessor, monitor(Successor), nil, storage:create(), storage:create()).
 
 connect(Id, nil) ->
     {ok, {Id, self()}};
@@ -47,80 +47,88 @@ connect(Id, Peer) ->
         io:format("Time out: no response")
     end.
 
-node(Id, Predecessor, Successor, Store, Next) ->
+node(Id, Predecessor, Successor, Next, Store, Replica) ->
     {_Skey, _Sref, Spid} = Successor,
     receive
         {key, Qref, Peer} ->
             Peer ! {Qref, Id},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {notify, New} ->
             {Pred, Updated} = notify(New, Id, Predecessor, Store, Successor),
             drop(Predecessor),
-            node(Id, monitor(Pred), Successor, Updated, Next);
+            node(Id, monitor(Pred), Successor, Next, Updated, Replica);
         {request, Peer} ->
             request(Peer, Predecessor, Successor),
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {status, Pred, Nx} ->
             {Succ, Nex} = stabilize(Pred, Id, Successor, Nx),
             drop(Successor),
-            node(Id, Predecessor, monitor(Succ), Store, Nex);
+            node(Id, Predecessor, monitor(Succ), Nex, Store, Replica);
         state ->
             io:format("node [~w]: store size ~w pred ~w succ ~w~n", [Id, length(Store), Predecessor, Successor]),
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         stabilize ->
             stabilize(Successor),
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         probe ->
             Spid ! {probe, Id, [Id], {erlang:monotonic_time(millisecond), length(Store)}},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {probe, Id, Nodes, {Time, Size}} ->
             Duration = erlang:monotonic_time(millisecond) - Time,
             io:format("Node [~w]: ~n\tprobe took ~w ms~n\tstore size ~w~n\tparticipating "
                       "nodes ~w~n",
                       [Id, Duration, Size, length(Nodes)]),
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {probe, I, Nodes, {Time, Size}} ->
             Spid ! {probe, I, [Id | Nodes], {Time, Size + length(Store)}},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {collect, Q, C} ->
             Spid ! {collect, Q, C, Id, Store},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {collect, Q, Client, Id, Collect} ->
             Client ! {collect, Q, Collect},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {collect, Q, C, I, Collect} ->
             Spid ! {collect, Q, C, I, storage:merge(Store, Collect)},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         validate ->
             validate(Id, Predecessor, Store),
             Spid ! {validate, Id},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {validate, Id} ->
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {validate, I} ->
             validate(Id, Predecessor, Store),
             Spid ! {validate, I},
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {add, Key, Value, Qref, Client} ->
             Updated = add(Key, Value, Qref, Client, Id, Predecessor, Successor, Store),
-            node(Id, Predecessor, Successor, Updated, Next);
+            node(Id, Predecessor, Successor, Next, Updated, Replica);
+        {replicate, Key, Value} ->
+            Updated = replicate(Key, Value, Replica),
+            node(Id, Predecessor, Successor, Next, Store, Updated);
+        {replicate, Elements} ->
+            % Our predecessor sends us all their elements, this will happen when we get a new predecessor
+            % We will simply accept all the elements as our new replica
+            node(Id, Predecessor, Successor, Next, Store, Elements);
         {lookup, Key, Qref, Client} ->
             lookup(Key, Qref, Client, Id, Predecessor, Successor, Store),
-            node(Id, Predecessor, Successor, Store, Next);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
         {handover, Elements} ->
             Merged = storage:merge(Elements, Store),
-            node(Id, Predecessor, Successor, Merged, Next);
+            Spid ! {replicate, Merged},
+            node(Id, Predecessor, Successor, Next, Merged, Replica);
         {'DOWN', Ref, process, _, _ } -> 
-            {Pred, Succ, Nxt} = down(Ref, Predecessor, Successor, Next),
-            node(Id, Pred, monitor(Succ), Store, Nxt);
+            {Pred, Succ, Nxt, NewStore, NewReplica} = down(Ref, Predecessor, Successor, Next, Store, Replica),
+            node(Id, Pred, monitor(Succ), Nxt, NewStore, NewReplica);
         Error ->
             io:format("node [~w]: Strange message ~w~n", [Id, Error])
     end.
 
-down(Ref, {_, Ref, _}, Successor, Next) ->
-        {nil, Successor, Next};
-down(Ref, Predecessor, {_, Ref, _}, New) ->
-    {Predecessor, monitor(New), nil}.
+down(Ref, {_, Ref, _}, Successor, Next, Store, Replica) ->
+    {nil, Successor, Next, storage:merge(Store, Replica), storage:create()};
+down(Ref, Predecessor, {_, Ref, _}, New, Store, Replica) ->
+    {Predecessor, monitor(New), nil, Store, Replica}.
 
 validate(Id, {Pkey, _, _}, Store) ->
     case lists:all(fun({Key, _}) -> key:between(Key, Pkey, Id) end, Store) of
@@ -135,11 +143,15 @@ add(Key, Value, Qref, Client, Id, {Pkey, _, _}, {_, _, Spid}, Store) ->
         true ->
             Updated = storage:add(Key, Value, Store),
             Client ! {Qref, ok},
+            Spid ! {replicate, Key, Value},
             Updated;
         false ->
             Spid ! {add, Key, Value, Qref, Client},
             Store
     end.
+
+replicate(Key, Value, Replica) ->
+    storage:add(Key, Value, Replica).
 
 lookup(Key, Qref, Client, Id, {Pkey, _, _}, {_, _, Spid}, Store) ->
     case key:between(Key, Pkey, Id) of
